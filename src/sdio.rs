@@ -54,9 +54,6 @@ pub const SD_WORD_DIV: usize = 4;
 pub const SD_CRC_IDX_MSB: usize = SD_BLOCK_LEN / SD_WORD_DIV;
 pub const SD_CRC_IDX_LSB: usize = SD_CRC_IDX_MSB + 1;
 
-/// Clock speed divider for full speed transfers
-pub const SD_CLK_DIV_FULL: u16 = 25;
-
 /// Clock speed divider for initialization transfers
 pub const SD_CLK_DIV_INIT: u16 = 25;
 
@@ -415,58 +412,58 @@ impl SdCardStatus {
 
         // Proceed with the if statements...
         if self.cc_error() {
-            return Err(SdioError::SdioCcError {});
+            return Err(SdioError::CcError {});
         }
 
         if self.com_crc_error() {
-            return Err(SdioError::SdioBadTxCrc7 {});
+            return Err(SdioError::BadTxCrc7 {});
         }
 
         if self.illegal_command() {
-            return Err(SdioError::SdioIllegalCommand {});
+            return Err(SdioError::IllegalCommand {});
         }
 
         if self.card_ecc_failed() {
-            return Err(SdioError::SdioCardEccFailed {});
+            return Err(SdioError::CardEccFailed {});
         }
 
         if self.out_of_range() {
-            return Err(SdioError::SdioOutOfRange {});
+            return Err(SdioError::OutOfRange {});
         }
 
         if self.address_error() {
-            return Err(SdioError::SdioAddressError {});
+            return Err(SdioError::AddressError {});
         }
 
         if self.block_len_error() {
-            return Err(SdioError::SdioBlockLenError {});
+            return Err(SdioError::BlockLenError {});
         }
 
         if self.erase_seq_error() {
-            return Err(SdioError::SdioEraseSeqError {});
+            return Err(SdioError::EraseSeqError {});
         }
 
         if self.erase_param() {
-            return Err(SdioError::SdioEraseParamError {});
+            return Err(SdioError::EraseParamError {});
         }
 
         if self.wp_violation() {
-            return Err(SdioError::SdioWpViolation {});
+            return Err(SdioError::WpViolation {});
         }
 
         if self.lock_unlocked_failed() {
-            return Err(SdioError::SdioLockUnlockFailed {});
+            return Err(SdioError::LockUnlockFailed {});
         }
 
         if self.wp_erase_skip() {
-            return Err(SdioError::SdioWpEraseSkip {});
+            return Err(SdioError::WpEraseSkip {});
         }
 
         if self.ake_seq_error() {
-            return Err(SdioError::SdioAkeSeqError {});
+            return Err(SdioError::AkeSeqError {});
         }
 
-        Err(SdioError::SdioCmdUnknownErr {})
+        Err(SdioError::CmdUnknownErr {})
     }
 
     /// Returns true if the OUT_OF_RANGE bit is set
@@ -637,6 +634,8 @@ pub struct Sdio4bit<'a, DmaCh: SingleChannelDma, P: PIOExt> {
         Transfer<DmaCh, Rx<(P, SM1)>, &'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV]>,
     >,
     sm_in_use: Option<StateMachine<(P, SM1), Running>>,
+
+    sd_full_clk_div: u16,
 }
 
 impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
@@ -649,6 +648,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         sd_clk_id: u8,
         sd_cmd_id: u8,
         sd_dat_base_id: u8,
+        sd_full_clk_div: u16,
     ) -> Self {
         // Initialilze the raw program variables from the rp2040_sdio.pio file
         let program_cmd_clk =
@@ -713,6 +713,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             tx_dma_in_use: None,
             rx_dma_in_use: None,
             sm_in_use: None,
+            sd_full_clk_div,
         }
     }
 
@@ -761,7 +762,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
                 let current_time = self.timer.get_counter();
                 
                 if current_time.checked_duration_since(start_time).unwrap().to_millis() > SD_CMD_TIMEOUT_MS {
-                    return Err(SdioError::SdioCmdTimeout {  });
+                    return Err(SdioError::CmdTimeout {  });
                 }
             }
 
@@ -787,7 +788,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             let crc = ((resp_buf[1] >> 16) & 0xFE) as u8;
 
             if good_crc != crc {
-                return Err(SdioError::SdioBadRxCrc7 {});
+                return Err(SdioError::BadRxCrc7 {});
             }
 
             let good_command_index = command.get_cmd_index();
@@ -795,7 +796,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             let command_index = ((resp_buf[0] >> 24) & 0x3F) as u32;
 
             if good_command_index != command_index {
-                return Err(SdioError::SdioWrongCmd {});
+                return Err(SdioError::WrongCmd {});
             }
         }
 
@@ -851,7 +852,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             SdCmdResponseType::R7 => {
                 let good_check_pattern = match command {
                     SdCmd::SendIfCond(check_pattern) => check_pattern,
-                    _ => return Err(SdioError::PE {}),
+                    _ => panic!("Command repsonds with R7, not SendIfCond!"),
                 };
                 // Bit 21 is the 1.2v support bit, 20 is the pcie support
                 //                                   4444 4444 3333 3333  3322 2222 2222 1111
@@ -863,14 +864,14 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
                 let voltage = (resp_buf[0] & 0x0000_0000_0000_0000__0000_0000_0000_1111) as u8;
 
                 if voltage != 0b0001 {
-                    return Err(SdioError::SdioBadVoltage { bad_volt: voltage });
+                    return Err(SdioError::BadVoltage { bad_volt: voltage });
                 }
 
                 // Verify the check pattern
                 let check_pattern = ((resp_buf[1] >> 24) & 0xFF) as u8;
 
                 if check_pattern != good_check_pattern {
-                    return Err(SdioError::SdioBadCheck {
+                    return Err(SdioError::BadCheck {
                         good_check: good_check_pattern,
                         bad_check: check_pattern,
                     });
@@ -881,7 +882,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
                     supports_pcie,
                 }))
             }
-            SdCmdResponseType::R0 => Err(SdioError::PE {}), // Shouldn't happen
+            SdCmdResponseType::R0 => {panic!("Reached R0 somehow!");}, // Shouldn't happen
         }
     }
 
@@ -892,7 +893,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             Some(sm) => sm,
 
             None => {
-                return Err(SdioError::SdioInTxRx {});
+                return Err(SdioError::InTxRx {});
             }
         };
 
@@ -923,7 +924,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             .out_shift_direction(ShiftDirection::Left)
             .autopush(false)
             .autopull(true)
-            .clock_divisor_fixed_point(SD_CLK_DIV_FULL, 0)
+            .clock_divisor_fixed_point(self.sd_full_clk_div, 0)
             .build(sm_dat);
 
         // Manually store the nibble count and response bit count to X an Y
@@ -1012,9 +1013,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
 
         match resp {
             2 => Ok(()),
-            5 => Err(SdioError::SdioBadTxCrc16 {}),
-            6 => Err(SdioError::SdioWriteFail {}),
-            _ => Err(SdioError::SdioWriteUnknown {}),
+            5 => Err(SdioError::BadTxCrc16 {}),
+            6 => Err(SdioError::WriteFail {}),
+            _ => Err(SdioError::WriteUnknown {}),
         }
     }
 
@@ -1040,7 +1041,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
 
         // Wait until there is something in the fifo
         let start_time = self.timer.get_counter();
-        while self.sm_cmd_rx.is_empty() {
+        while self.sm_dat_rx.as_ref().unwrap().is_empty() {
             let current_time = self.timer.get_counter();
             
             if current_time.checked_duration_since(start_time).unwrap().to_millis() > SD_CMD_TIMEOUT_MS {
@@ -1071,7 +1072,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         let response = match response {
             Some(response) => response,
             None => {
-                return Err(SdioError::SdioWriteTimeout {});
+                return Err(SdioError::WriteTimeout {});
             }
         };
 
@@ -1094,7 +1095,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             Some(sm) => sm,
 
             None => {
-                return Err(SdioError::SdioInTxRx {});
+                return Err(SdioError::InTxRx {});
             }
         };
 
@@ -1113,7 +1114,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             .in_shift_direction(ShiftDirection::Left)
             .autopush(true)
             .autopull(true)
-            .clock_divisor_fixed_point(SD_CLK_DIV_FULL, 0)
+            .clock_divisor_fixed_point(self.sd_full_clk_div, 0)
             .build(sm_dat);
 
         // Manually store the nibble count to X
@@ -1219,7 +1220,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Check the crc and if it's bad, error out!
 
         if crc != good_crc {
-            return Err(SdioError::SdioBadRxCrc16 {
+            return Err(SdioError::BadRxCrc16 {
                 good_crc,
                 bad_crc: crc,
             });
@@ -1275,9 +1276,10 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.send_command(SdCmd::GoIdleState)?;
 
         // Send CMD8
+        // !TODO! less runtime checks
         let cic = match self.send_command(SdCmd::SendIfCond(0xAA))? {
             SdCmdResponse::R7(cic) => cic,
-            _ => return Err(SdioError::PE {}),
+            _ => {panic!("Incorrect response type!");},
         };
 
         // Send ACMD41 until the card is no longer busy, and once ready verify
@@ -1290,20 +1292,20 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         while is_busy {
             ocr = match self.send_command(acmd41)? {
                 SdCmdResponse::R3(ocr) => ocr,
-                _ => return Err(SdioError::PE {}),
+                _ => {panic!("Incorrect response type!");},
             };
 
             is_busy = ocr.is_busy();
         }
 
         if (ocr.get_voltage_window() & SD_OCR_VOLT_RANGE) != SD_OCR_VOLT_RANGE {
-            return Err(SdioError::SdioBadVoltRange {});
+            return Err(SdioError::BadVoltRange {});
         }
 
         // Get the CID
         let cid = match self.send_command(SdCmd::AllSendCid)? {
             SdCmdResponse::R2(cid) => cid,
-            _ => return Err(SdioError::PE {}),
+            _ => panic!("Incorrect response type!"),
         };
 
         self.cid = SdCid::new(cid);
@@ -1311,7 +1313,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Get the RCA
         let rca = match self.send_command(SdCmd::SendRelativeAddr)? {
             SdCmdResponse::R6(rca) => rca,
-            _ => return Err(SdioError::PE {}),
+            _ => {panic!("Incorrect response type!");},
         };
 
         self.rca = rca;
@@ -1319,7 +1321,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Get the CSD
         let csd = match self.send_command(SdCmd::SendCsd(rca))? {
             SdCmdResponse::R2(csd) => csd,
-            _ => return Err(SdioError::PE {}),
+            _ => {panic!("Incorrect response type!");},
         };
 
         self.csd = SdCsd::new(csd);
@@ -1334,7 +1336,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.send_command(SdCmd::SetBlockLen(SD_BLOCK_LEN as u32))?;
 
         // Speed up the clock to 25mhz
-        self.sm_cmd.clock_divisor_fixed_point(SD_CLK_DIV_FULL, 0);
+        self.sm_cmd.clock_divisor_fixed_point(self.sd_full_clk_div, 0);
 
         // Read the first block
         self.start_block_rx()?;

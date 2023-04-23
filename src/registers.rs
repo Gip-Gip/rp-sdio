@@ -1,4 +1,5 @@
 //! Internal registers of the SD card
+//! !TODO! **STILL NEEDS IMPLEMENTATION**
 
 pub struct SdCid {
     cid: [u32; 4],

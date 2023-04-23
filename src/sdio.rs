@@ -1,4 +1,5 @@
-//! Code used to interface with SD cards using SDIO
+//! Used to interface with SD cards using SDIO
+//!
 
 use crate::errors::SdioError;
 use crate::registers::{SdCic, SdCid, SdCsd, SdOcr};

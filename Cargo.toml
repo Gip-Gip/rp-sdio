@@ -1,7 +1,14 @@
 [package]
 name = "rp-sdio"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
+authors = ["Charles Thompson"]
+license = "MIT"
+readme = "README.md"
+keywords = ["sdio", "filesystem", "no_std", "embedded", "rp2040"]
+catagories = ["filesystem", "embedded", "no_std", "hardware-support"]
+description = "simple crate to interface between a disk and it's partitions"
+repository = "https://github.com/Gip-Gip/rp-sdio"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

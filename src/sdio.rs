@@ -1,12 +1,11 @@
 //! Code used to interface with SD cards using SDIO
 
 use crate::errors::SdioError;
-use crate::registers::{SdCid, SdCsd, SdOcr, SdCic};
+use crate::registers::{SdCic, SdCid, SdCsd, SdOcr};
 use core::{cmp, mem};
 use cortex_m::singleton;
 use embedded_io::blocking::{Read, Seek, Write};
 use embedded_io::{Io, SeekFrom};
-use hal::Timer;
 use hal::dma::single_buffer;
 use hal::dma::single_buffer::Transfer;
 use hal::dma::SingleChannel as SingleChannelDma;
@@ -14,6 +13,7 @@ use hal::pio::{
     InstalledProgram, MovStatusConfig, PIOBuilder, PIOExt, PinDir, Running, Rx, ShiftDirection,
     StateMachine, Tx, UninitStateMachine, PIO, SM0, SM1,
 };
+use hal::Timer;
 use pio::{Instruction, InstructionOperands, OutDestination, SetDestination};
 use pio_proc::pio_file;
 use rp2040_hal as hal;
@@ -155,7 +155,6 @@ const FLAG_R6: u16 = 0x280;
 const FLAG_R7: u16 = 0x300;
 const FLAGS_R: u16 = 0x380;
 
-
 #[derive(PartialEq, Clone, Copy)]
 #[repr(u16)]
 /// Possible commands to give to the SD card
@@ -232,7 +231,7 @@ impl SdCmd {
     /// Get the response type of a command
     pub fn get_cmd_response(&self) -> SdCmdResponseType {
         let val: u16 = (*self).into();
-        
+
         match val & FLAGS_R {
             FLAG_R1 => SdCmdResponseType::R1,
             FLAG_R1B => SdCmdResponseType::R1b,
@@ -411,6 +410,7 @@ impl SdCardStatus {
         }
 
         // Proceed with the if statements...
+        // !TODO! make less ugly
         if self.cc_error() {
             return Err(SdioError::CcError {});
         }
@@ -466,86 +466,107 @@ impl SdCardStatus {
         Err(SdioError::CmdUnknownErr {})
     }
 
+    #[inline]
     /// Returns true if the OUT_OF_RANGE bit is set
     pub fn out_of_range(&self) -> bool {
         (self.card_status & (1 << 31)) > 0
     }
+    #[inline]
     /// Returns true if the ADDRESS_ERROR bit is set
     pub fn address_error(&self) -> bool {
         (self.card_status & (1 << 30)) > 0
     }
+    #[inline]
     /// Returns true if the BLOCK_LEN_ERROR bit is set
     pub fn block_len_error(&self) -> bool {
         (self.card_status & (1 << 29)) > 0
     }
+    #[inline]
     /// Returns true if the ERASE_SEQ_ERROR bit is set
     pub fn erase_seq_error(&self) -> bool {
         (self.card_status & (1 << 28)) > 0
     }
+    #[inline]
     /// Returns true if the ERASE_PARAM bit is set
     pub fn erase_param(&self) -> bool {
         (self.card_status & (1 << 27)) > 0
     }
+    #[inline]
     /// Returns true if the WP_VIOLATION bit is set
     pub fn wp_violation(&self) -> bool {
         (self.card_status & (1 << 26)) > 0
     }
+    #[inline]
     /// Returns true if the CARD_IS_LOCKED bit is set
     pub fn card_is_locked(&self) -> bool {
         (self.card_status & (1 << 25)) > 0
     }
+    #[inline]
     /// Returns true if the LOCK_UNLOCK_FAILED bit is set
     pub fn lock_unlocked_failed(&self) -> bool {
         (self.card_status & (1 << 24)) > 0
     }
+    #[inline]
     /// Returns true if the COM_CRC_ERROR bit is set
     pub fn com_crc_error(&self) -> bool {
         (self.card_status & (1 << 23)) > 0
     }
+    #[inline]
     /// Returns true if the ILLEGAL_COMMAND bit is set
     pub fn illegal_command(&self) -> bool {
         (self.card_status & (1 << 22)) > 0
     }
+    #[inline]
     /// Returns true if the CARD_ECC_FAILED bit is set
     pub fn card_ecc_failed(&self) -> bool {
         (self.card_status & (1 << 21)) > 0
     }
+    #[inline]
     /// Returns true if the CC_ERROR bit is set
     pub fn cc_error(&self) -> bool {
         (self.card_status & (1 << 20)) > 0
     }
+    #[inline]
     /// Returns true if the ERROR bit is set
     pub fn error(&self) -> bool {
         (self.card_status & (1 << 19)) > 0
     }
+    #[inline]
     /// Returns true if the CSD_OVERWRITE bit is set
     pub fn csd_overwrite(&self) -> bool {
         (self.card_status & (1 << 16)) > 0
     }
+    #[inline]
     /// Returns true if the WP_ERASE_SKIP bit is set
     pub fn wp_erase_skip(&self) -> bool {
         (self.card_status & (1 << 15)) > 0
     }
+    #[inline]
     /// Returns true if the CARD_ECC_DISABLED bit is set
     pub fn card_ecc_disabled(&self) -> bool {
         (self.card_status & (1 << 14)) > 0
     }
+    #[inline]
     /// Returns true if the ERASE_RESET bit is set
     pub fn erase_reset(&self) -> bool {
         (self.card_status & (1 << 13)) > 0
     }
+    #[inline]
     /// Returns true if the READY_FOR_DATA bit is set
     pub fn ready_for_data(&self) -> bool {
         (self.card_status & (1 << 8)) > 0
     }
+    #[inline]
     /// Returns true if the FX_EVENT bit is set
     pub fn fx_event(&self) -> bool {
         (self.card_status & (1 << 6)) > 0
     }
+    #[inline]
     /// Returns true if the APP_CMD bit is set
     pub fn app_cmd(&self) -> bool {
         (self.card_status & (1 << 5)) > 0
     }
+    #[inline]
     /// Returns true if the AKE_SEQ_ERROR bit is set
     pub fn ake_seq_error(&self) -> bool {
         (self.card_status & (1 << 3)) > 0
@@ -585,8 +606,6 @@ impl SdCurrentState {
 
 /// SDIO 4bit interface struct
 pub struct Sdio4bit<'a, DmaCh: SingleChannelDma, P: PIOExt> {
-    /// PIO struct, can be PIO0 or PIO1. programs are installed to this.
-    pio: PIO<P>,
     /// DMA used to read/write data from the SD card
     dma: Option<DmaCh>,
     /// Reference to the processor's timer
@@ -626,21 +645,23 @@ pub struct Sdio4bit<'a, DmaCh: SingleChannelDma, P: PIOExt> {
     sm_dat_rx: Option<Rx<(P, SM1)>>,
     sm_dat_tx: Option<Tx<(P, SM1)>>,
 
-    /// Home for DMA and running state machine during TX and RX
-    tx_dma_in_use: Option<
-        Transfer<DmaCh, &'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV], Tx<(P, SM1)>>,
-    >,
-    rx_dma_in_use: Option<
-        Transfer<DmaCh, Rx<(P, SM1)>, &'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV]>,
-    >,
+    /// Home for DMA during TX
+    tx_dma_in_use:
+        Option<Transfer<DmaCh, &'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV], Tx<(P, SM1)>>>,
+    /// Home for DMA during RX
+    rx_dma_in_use:
+        Option<Transfer<DmaCh, Rx<(P, SM1)>, &'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV]>>,
+    /// Home for the cmd state machine during TX and RX
     sm_in_use: Option<StateMachine<(P, SM1), Running>>,
 
+    /// Clock divider after initialization
     sd_full_clk_div: u16,
 }
 
 impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
+    /// Create a new SDIO interface
     pub fn new(
-        mut pio: PIO<P>,
+        pio: &mut PIO<P>,
         dma: DmaCh,
         timer: &'a Timer,
         sm0: UninitStateMachine<(P, SM0)>,
@@ -687,7 +708,6 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         let sm_dat = sm1;
 
         Self {
-            pio,
             dma: Some(dma),
             timer,
             sm_cmd,
@@ -731,7 +751,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.send_command_raw(command)
     }
 
-    /// Send a command to the SD card
+    /// Send a command to the SD card, does not retry
     fn send_command_raw(&mut self, command: SdCmd) -> Result<SdCmdResponse, SdioError> {
         // If the command is an app command, first send the AppCmd command
         if command.is_acmd() {
@@ -760,9 +780,17 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             let start_time = self.timer.get_counter();
             while self.sm_cmd_rx.is_empty() {
                 let current_time = self.timer.get_counter();
-                
-                if current_time.checked_duration_since(start_time).unwrap().to_millis() > SD_CMD_TIMEOUT_MS {
-                    return Err(SdioError::CmdTimeout {  });
+
+                let time_delta = current_time
+                    .checked_duration_since(start_time)
+                    .unwrap()
+                    .to_millis();
+
+                if time_delta > SD_CMD_TIMEOUT_MS {
+                    return Err(SdioError::CmdTimeout {
+                        cmd: command.get_cmd_index() as u8,
+                        time_ms: time_delta,
+                    });
                 }
             }
 
@@ -788,15 +816,21 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             let crc = ((resp_buf[1] >> 16) & 0xFE) as u8;
 
             if good_crc != crc {
-                return Err(SdioError::BadRxCrc7 {});
+                return Err(SdioError::BadRxCrc7 {
+                    good_crc,
+                    bad_crc: crc,
+                });
             }
 
             let good_command_index = command.get_cmd_index();
 
-            let command_index = ((resp_buf[0] >> 24) & 0x3F) as u32;
+            let command_index = (resp_buf[0] >> 24) & 0x3F;
 
             if good_command_index != command_index {
-                return Err(SdioError::WrongCmd {});
+                return Err(SdioError::WrongCmd {
+                    good_cmd: good_command_index as u8,
+                    bad_cmd: command_index as u8,
+                });
             }
         }
 
@@ -882,7 +916,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
                     supports_pcie,
                 }))
             }
-            SdCmdResponseType::R0 => {panic!("Reached R0 somehow!");}, // Shouldn't happen
+            SdCmdResponseType::R0 => {
+                panic!("Reached R0 somehow!");
+            } // Shouldn't happen
         }
     }
 
@@ -988,37 +1024,41 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         Ok(())
     }
 
-    pub fn check_write_response(mut resp: u32) -> Result<(), SdioError> {
-        if (!resp & 0xFFFF_0000) == 0 {
-            resp <<= 16;
+    /// Check the checks the response of the SD card to make sure there
+    /// haven't been any errors in writing. Will throw an error if one
+    /// is detected.
+    pub fn check_write_response(mut response: u32) -> Result<(), SdioError> {
+        if (!response & 0xFFFF_0000) == 0 {
+            response <<= 16;
         }
 
-        if (!resp & 0xFF00_0000) == 0 {
-            resp <<= 8;
+        if (!response & 0xFF00_0000) == 0 {
+            response <<= 8;
         }
 
-        if (!resp & 0xF000_0000) == 0 {
-            resp <<= 4;
+        if (!response & 0xF000_0000) == 0 {
+            response <<= 4;
         }
 
-        if (!resp & 0xC000_0000) == 0 {
-            resp <<= 2;
+        if (!response & 0xC000_0000) == 0 {
+            response <<= 2;
         }
 
-        if (!resp & 0x8000_0000) == 0 {
-            resp <<= 1;
+        if (!response & 0x8000_0000) == 0 {
+            response <<= 1;
         }
 
-        resp = resp >> 28 & 7;
+        response = response >> 28 & 7;
 
-        match resp {
+        match response {
             2 => Ok(()),
             5 => Err(SdioError::BadTxCrc16 {}),
             6 => Err(SdioError::WriteFail {}),
-            _ => Err(SdioError::WriteUnknown {}),
+            _ => Err(SdioError::WriteUnknown { response }),
         }
     }
 
+    #[inline]
     /// Returns true if you need to poll the tx
     pub fn is_tx(&self) -> bool {
         match &self.tx_dma_in_use {
@@ -1041,10 +1081,16 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
 
         // Wait until there is something in the fifo
         let start_time = self.timer.get_counter();
+        let mut time_delta = 0;
         while self.sm_dat_rx.as_ref().unwrap().is_empty() {
             let current_time = self.timer.get_counter();
-            
-            if current_time.checked_duration_since(start_time).unwrap().to_millis() > SD_CMD_TIMEOUT_MS {
+
+            time_delta = current_time
+                .checked_duration_since(start_time)
+                .unwrap()
+                .to_millis();
+
+            if time_delta > SD_CMD_TIMEOUT_MS {
                 break;
             }
         }
@@ -1072,7 +1118,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         let response = match response {
             Some(response) => response,
             None => {
-                return Err(SdioError::WriteTimeout {});
+                return Err(SdioError::WriteTimeout {
+                    time_ms: time_delta,
+                });
             }
         };
 
@@ -1083,12 +1131,16 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         Ok(false)
     }
 
+    #[inline]
+    /// Wait for the data transfer to finish
     pub fn wait_tx(&mut self) -> Result<(), SdioError> {
         while self.poll_tx()? {}
 
         Ok(())
     }
 
+    #[inline]
+    /// Start reading data from the SD card into the working block
     pub fn start_block_rx(&mut self) -> Result<(), SdioError> {
         // If this value is None, there is already a transfer occuring
         let sm_dat = match mem::take(&mut self.sm_dat) {
@@ -1176,6 +1228,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         Ok(())
     }
 
+    #[inline]
     /// Return true if you need to poll rx
     pub fn is_rx(&self) -> bool {
         match &self.rx_dma_in_use {
@@ -1183,6 +1236,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
             None => false,
         }
     }
+
     /// Poll the current transfer, return true if still transferring
     pub fn poll_rx(&mut self) -> Result<bool, SdioError> {
         // Return false if we don't need to poll rx, true if the DMA is still transferring
@@ -1230,6 +1284,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         Ok(false)
     }
 
+    #[inline]
+    /// Wait until we're done recieving data
     pub fn wait_rx(&mut self) -> Result<(), SdioError> {
         while self.poll_rx()? {}
 
@@ -1268,8 +1324,13 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Wait 1ms to ensure that the card is properly initialized
         let start_time = self.timer.get_counter();
         let mut current_time = start_time;
-        while current_time.checked_duration_since(start_time).unwrap().to_millis() < SD_STARTUP_MS {
-                current_time = self.timer.get_counter();
+        while current_time
+            .checked_duration_since(start_time)
+            .unwrap()
+            .to_millis()
+            < SD_STARTUP_MS
+        {
+            current_time = self.timer.get_counter();
         }
 
         // Send CMD0
@@ -1279,7 +1340,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // !TODO! less runtime checks
         let cic = match self.send_command(SdCmd::SendIfCond(0xAA))? {
             SdCmdResponse::R7(cic) => cic,
-            _ => {panic!("Incorrect response type!");},
+            _ => {
+                panic!("Incorrect response type!");
+            }
         };
 
         // Send ACMD41 until the card is no longer busy, and once ready verify
@@ -1292,14 +1355,19 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         while is_busy {
             ocr = match self.send_command(acmd41)? {
                 SdCmdResponse::R3(ocr) => ocr,
-                _ => {panic!("Incorrect response type!");},
+                _ => {
+                    panic!("Incorrect response type!");
+                }
             };
 
             is_busy = ocr.is_busy();
         }
 
-        if (ocr.get_voltage_window() & SD_OCR_VOLT_RANGE) != SD_OCR_VOLT_RANGE {
-            return Err(SdioError::BadVoltRange {});
+        let voltage_range = ocr.get_voltage_window();
+        if (voltage_range & SD_OCR_VOLT_RANGE) != SD_OCR_VOLT_RANGE {
+            return Err(SdioError::BadVoltRange {
+                range: voltage_range,
+            });
         }
 
         // Get the CID
@@ -1313,7 +1381,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Get the RCA
         let rca = match self.send_command(SdCmd::SendRelativeAddr)? {
             SdCmdResponse::R6(rca) => rca,
-            _ => {panic!("Incorrect response type!");},
+            _ => {
+                panic!("Incorrect response type!");
+            }
         };
 
         self.rca = rca;
@@ -1321,7 +1391,9 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Get the CSD
         let csd = match self.send_command(SdCmd::SendCsd(rca))? {
             SdCmdResponse::R2(csd) => csd,
-            _ => {panic!("Incorrect response type!");},
+            _ => {
+                panic!("Incorrect response type!");
+            }
         };
 
         self.csd = SdCsd::new(csd);
@@ -1336,7 +1408,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.send_command(SdCmd::SetBlockLen(SD_BLOCK_LEN as u32))?;
 
         // Speed up the clock to 25mhz
-        self.sm_cmd.clock_divisor_fixed_point(self.sd_full_clk_div, 0);
+        self.sm_cmd
+            .clock_divisor_fixed_point(self.sd_full_clk_div, 0);
 
         // Read the first block
         self.start_block_rx()?;

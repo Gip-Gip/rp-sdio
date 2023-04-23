@@ -1,18 +1,19 @@
-//! Errors in the msbaker ecosystem
+//! Possible errors that can be thrown
 
 use embedded_io::{blocking::ReadExactError, Error, ErrorKind};
 use snafu::prelude::*;
 
 #[derive(Debug, Snafu)]
+#[non_exhaustive]
 pub enum SdioError {
     #[snafu(display("Timeout on SD command!"))]
-    CmdTimeout { },
+    CmdTimeout { cmd: u8, time_ms: u64 },
     #[snafu(display("Timeout on write!"))]
-    WriteTimeout {},
+    WriteTimeout { time_ms: u64 },
     #[snafu(display("Response is to the wrong command!"))]
-    WrongCmd { },
+    WrongCmd { good_cmd: u8, bad_cmd: u8 },
     #[snafu(display("Bad rx CRC7!"))]
-    BadRxCrc7 {},
+    BadRxCrc7 { good_crc: u8, bad_crc: u8 },
     #[snafu(display("Bad tx CRC7!"))]
     BadTxCrc7 {},
     #[snafu(display("Bad rx CRC16!"))]
@@ -24,11 +25,11 @@ pub enum SdioError {
     #[snafu(display("Bad CMD8 voltage!"))]
     BadVoltage { bad_volt: u8 },
     #[snafu(display("Bad OCR voltage range!"))]
-    BadVoltRange {},
+    BadVoltRange { range: u32 },
     #[snafu(display("Failed to write!"))]
     WriteFail {},
     #[snafu(display("Unknown response to write!"))]
-    WriteUnknown {},
+    WriteUnknown { response: u32 },
     #[snafu(display("CC Error!"))]
     CcError {},
     #[snafu(display("Card ECC failed!"))]
@@ -80,7 +81,7 @@ impl From<SdioError> for ReadExactError<SdioError> {
 impl From<ReadExactError<SdioError>> for SdioError {
     fn from(e: ReadExactError<SdioError>) -> SdioError {
         match e {
-            ReadExactError::UnexpectedEof => Self::UnexpectedEof {  },
+            ReadExactError::UnexpectedEof => Self::UnexpectedEof {},
             ReadExactError::Other(e) => e,
         }
     }

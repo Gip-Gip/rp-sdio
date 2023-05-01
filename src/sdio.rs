@@ -4,6 +4,7 @@
 use crate::errors::SdioError;
 use crate::registers::{SdCic, SdCid, SdCsd, SdOcr};
 use core::{cmp, mem};
+use bytemuck::{bytes_of_mut, bytes_of};
 use cortex_m::singleton;
 use embedded_io::blocking::{Read, Seek, Write};
 use embedded_io::{Io, SeekFrom};
@@ -54,6 +55,7 @@ pub const SD_WORD_DIV: usize = 4;
 
 pub const SD_CRC_IDX_MSB: usize = SD_BLOCK_LEN / SD_WORD_DIV;
 pub const SD_CRC_IDX_LSB: usize = SD_CRC_IDX_MSB + 1;
+pub const SD_TEND_IDX: usize = SD_CRC_IDX_LSB + 1;
 
 /// Clock speed divider for initialization transfers
 pub const SD_CLK_DIV_INIT: u16 = 25;
@@ -122,7 +124,7 @@ pub fn crc16_4bit(data: &[u32]) -> u64 {
         // Convert the data from 4 bytes into 1 word, and assign it to "data in"
         // "data_in" basically represents the input signal to our virtual hardware
         // crc calculator
-        let data_in = word;
+        let data_in = word.swap_bytes();
 
         // Discard the data that is "getting written out" and use it to xor
         // with the data "coming in"
@@ -637,6 +639,8 @@ pub struct Sdio4bit<'a, DmaCh: SingleChannelDma, P: PIOExt> {
     working_block: Option<&'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV]>,
     /// The address of the current working block
     working_block_num: u32,
+    /// Set true if we should flush
+    should_flush: bool,
     /// The current read/write position
     position: u64,
     /// The size of the sd card in blocks
@@ -725,9 +729,10 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
 
             working_block: Some(working_block),
             working_block_num: 0,
+            should_flush: false,
+
             position: 0,
             size: 0,
-
             // All start as none
             sm_dat_rx: None,
             sm_dat_tx: None,
@@ -944,13 +949,11 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Calculate the crc of the block and place it at the end of the block
         let crc = crc16_4bit(&working_block[..SD_BLOCK_LEN / SD_WORD_DIV]);
 
-        let len = working_block.len();
-
-        working_block[SD_CRC_IDX_LSB] = (crc & 0xFFFF_FFFF) as u32;
-        working_block[SD_CRC_IDX_MSB] = ((crc >> 32) & 0xFFFF_FFFF) as u32;
+        working_block[SD_CRC_IDX_LSB] = ((crc & 0xFFFF_FFFF) as u32).swap_bytes();
+        working_block[SD_CRC_IDX_MSB] = (((crc >> 32) & 0xFFFF_FFFF) as u32).swap_bytes();
 
         // Place the transimssion end signal at the end of the block
-        working_block[len - 1] = 0xFFFF_FFFF;
+        working_block[SD_TEND_IDX] = 0xFFFF_FFFF;
 
         // Now initialize the state machine with the TX program
         let (mut sm_dat, sm_dat_rx, mut sm_dat_tx) = PIOBuilder::from_program(program)
@@ -1008,7 +1011,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         sm_dat_tx.write(0b1111_1111_1111_1111__1111_1111_1111_0000);
 
         // Initialize the DMA transfer
-        let tx_transfer = single_buffer::Config::new(dma, working_block, sm_dat_tx);
+        let mut tx_transfer = single_buffer::Config::new(dma, working_block, sm_dat_tx);
+        tx_transfer.bswap(true);
 
         // Send the write block command
         self.send_command(SdCmd::WriteBlock(self.working_block_num))?;
@@ -1212,7 +1216,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         });
 
         // Initialize the DMA transfer
-        let rx_transfer = single_buffer::Config::new(dma, sm_dat_rx, working_block);
+        let mut rx_transfer = single_buffer::Config::new(dma, sm_dat_rx, working_block);
+        rx_transfer.bswap(true);
 
         // Start the state machine and DMA
         let rx_transfer = rx_transfer.start();
@@ -1242,7 +1247,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
     pub fn poll_rx(&mut self) -> Result<bool, SdioError> {
         // Return false if we don't need to poll rx, true if the DMA is still transferring
         let ready = match &self.rx_dma_in_use {
-            Some(tx_dma) => tx_dma.is_done(),
+            Some(rx_dma) => rx_dma.is_done(),
             None => return Ok(false),
         };
 
@@ -1263,7 +1268,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         // Save the CRC for later
 
         let crc: u64 =
-            (working_block[SD_CRC_IDX_LSB] as u64) | ((working_block[SD_CRC_IDX_MSB] as u64) << 32);
+            (working_block[SD_CRC_IDX_LSB].swap_bytes() as u64) | ((working_block[SD_CRC_IDX_MSB].swap_bytes() as u64) << 32);
         let good_crc = crc16_4bit(&working_block[..SD_BLOCK_LEN / SD_WORD_DIV]);
 
         // Replace the appropriate borrowed variables
@@ -1434,82 +1439,25 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Read for Sdio4bit<'a, DmaCh, P> {
 
         if current_block_num != self.working_block_num {
             self.flush()?;
+            self.wait_tx()?;
 
             self.working_block_num = current_block_num;
             self.start_block_rx()?;
             self.wait_rx()?;
         }
 
-        let working_block = self.working_block.as_ref().unwrap();
+        let working_block = & **self.working_block.as_ref().unwrap();
+        let working_block_bytes = bytes_of(working_block); 
 
-        // Ensure buffer_index and self.position are incremented at
-        // the same time
-        let mut buffer_index: usize = 0;
-        let mut block_index: usize =
-            ((self.position % (SD_BLOCK_LEN as u64)) as usize) / SD_WORD_DIV;
+        let block_index: usize = (self.position % (SD_BLOCK_LEN as u64)) as usize;
 
-        // First read all the bytes that don't align with words
-        let offset = (self.position % (SD_WORD_DIV as u64)) as usize;
-        let shift = offset * 8;
+        let bytes_transfered = cmp::min(SD_BLOCK_LEN - block_index, buffer.len());
 
-        // If the bytes aren't aligned
-        if shift != 0 {
-            let mut buffer_word: u32 = working_block[block_index] << shift;
+        buffer[..bytes_transfered].copy_from_slice(&working_block_bytes[block_index..block_index + bytes_transfered]);
 
-            while (self.position % (SD_WORD_DIV as u64)) != 0 && buffer.len() > buffer_index {
-                buffer[buffer_index] = (buffer_word >> 24) as u8;
-                buffer_word <<= 8;
-
-                buffer_index += 1;
-                self.position += 1;
-            }
-
-            block_index += 1;
-        }
-
-        // Now that the bytes are aligned, time to convert them all
-        // (until we can't)
-        while (buffer.len() - buffer_index) >= SD_WORD_DIV {
-            // Check if the position is now outside of the working block,
-            // and if so return with bytes written
-            if block_index >= (SD_BLOCK_LEN / SD_WORD_DIV) {
-                return Ok(buffer_index);
-            }
-
-            let buffer_bytes = working_block[block_index].to_be_bytes();
-
-            buffer[buffer_index..buffer_index + 4].copy_from_slice(&buffer_bytes);
-
-            // Increment the indicies
-            buffer_index += SD_WORD_DIV as usize;
-            self.position += SD_WORD_DIV as u64;
-            block_index += 1;
-        }
-
-        // Lastly write all the bytes that don't align with words(again)
-        let remaining = buffer.len() - buffer_index;
-
-        // If the bytes aren't aligned...
-        if remaining > 0 {
-            // Check if the position is now outside of the working block,
-            // and if so return with bytes written
-            if block_index >= (SD_BLOCK_LEN / SD_WORD_DIV) {
-                return Ok(buffer_index);
-            }
-
-            let mut buffer_word: u32 = working_block[block_index];
-
-            while buffer.len() > buffer_index {
-                buffer[buffer_index] = (buffer_word >> 24) as u8;
-
-                buffer_word <<= 8;
-
-                buffer_index += 1;
-                self.position += 1;
-            }
-        }
-
-        Ok(buffer_index)
+        self.position += bytes_transfered as u64;
+        
+        Ok(bytes_transfered)
     }
 }
 
@@ -1528,120 +1476,49 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Write for Sdio4bit<'a, DmaCh, P> {
 
         if current_block_num != self.working_block_num {
             self.flush()?;
+            self.wait_tx()?;
 
             self.working_block_num = current_block_num;
             self.start_block_rx()?;
             self.wait_rx()?;
         }
 
-        let working_block = &mut self.working_block.as_mut().unwrap();
+        // Set "should flush" to true since we are writing to the data!
+        self.should_flush = true;
 
-        // Ensure buffer_index and self.position are incremented at
-        // the same time
-        let mut buffer_index: usize = 0;
-        let mut block_index: usize =
-            ((self.position % (SD_BLOCK_LEN as u64)) as usize) / SD_WORD_DIV;
+        let working_block = &mut **self.working_block.as_mut().unwrap();
+        let working_block_bytes = bytes_of_mut(working_block);
 
-        // First write all the bytes that don't align with words
-        let offset = (self.position % (SD_WORD_DIV as u64)) as usize;
-        let mut shift = 24 - (8 * offset) as usize;
-        let remaining = cmp::min(buffer.len() + offset, 4);
+        let block_index: usize = (self.position % (SD_BLOCK_LEN as u64)) as usize;
 
-        // If the bytes aren't aligned
-        if shift != 24 {
-            // Prepare a buffer word identical to the working block
-            // Mask A keeps all bytes before the data intact, mask b keeps
-            // all bytes after the data intact(if the length is 3 or under)
-            let mask_a = 0xFFFF_FFFF << (shift + 8);
-            // If we shift 32 it will overflow, so we have to shift twice...
-            let mask_b = 0xFFFF_FFFF >> ((8 * remaining) - 1) >> 1;
-            let mut buffer_word: u32 = working_block[block_index] & (mask_a | mask_b);
+        let bytes_transfered = cmp::min(SD_BLOCK_LEN - block_index, buffer.len());
 
-            while shift > 0 && buffer.len() > buffer_index {
-                buffer_word |= (buffer[buffer_index] as u32) << shift;
+        working_block_bytes[block_index..block_index + bytes_transfered].copy_from_slice(&buffer[..bytes_transfered]);
 
-                shift -= 8;
-                buffer_index += 1;
-                self.position += 1;
-            }
+        self.position += bytes_transfered as u64;
+        
+        Ok(bytes_transfered)
 
-            if buffer.len() > buffer_index {
-                buffer_word |= buffer[buffer_index] as u32;
-                buffer_index += 1;
-                self.position += 1;
-            }
-
-            // Write the buffer word to the working block
-            working_block[block_index] = buffer_word;
-            block_index += 1;
-        }
-
-        // Now that the bytes are aligned, time to convert them all into words
-        // (until we can't)
-        while (buffer.len() - buffer_index) >= SD_WORD_DIV {
-            // Check if the position is now outside of the working block,
-            // and if so return with bytes written
-            if block_index >= (SD_BLOCK_LEN / SD_WORD_DIV) {
-                return Ok(buffer_index);
-            }
-
-            let buffer_slice = &buffer[buffer_index..buffer_index + SD_WORD_DIV];
-            let buffer_word = u32::from_be_bytes(buffer_slice.try_into().unwrap());
-
-            // Write the buffer word to the working block
-            working_block[block_index] = buffer_word;
-
-            // Increment the indicies
-            buffer_index += SD_WORD_DIV as usize;
-            self.position += SD_WORD_DIV as u64;
-            block_index += 1;
-        }
-
-        // Lastly write all the bytes that don't align with words(again)
-        let remaining = buffer.len() - buffer_index;
-
-        // If the bytes aren't aligned...
-        if remaining > 0 {
-            // Check if the position is now outside of the working block,
-            // and if so return with bytes written
-            if block_index >= (SD_BLOCK_LEN / SD_WORD_DIV) {
-                return Ok(buffer_index);
-            }
-
-            let mut shift: usize = 24;
-
-            // Prepare a buffer word
-            // The mask preserves all bytes after the data to be written
-            let mask: u32 = 0xFFFF_FFFF >> (8 * remaining);
-            let mut buffer_word: u32 = working_block[block_index] & mask;
-
-            while buffer_index < buffer.len() {
-                buffer_word |= (buffer[buffer_index] as u32) << shift;
-
-                shift -= 8;
-                buffer_index += 1;
-                self.position += 1;
-            }
-
-            // Write the buffer word to the working block
-            working_block[block_index] = buffer_word;
-        }
-
-        Ok(buffer_index)
     }
 
     fn flush(&mut self) -> Result<(), SdioError> {
-        // If already in tx, we don't need to flush
-        if self.is_tx() {
-            self.wait_tx()?;
+        // If we don't need to flush, don't flush!
+        if !self.should_flush {
             return Ok(());
         }
 
-        // Otherwise wait for the recieve to be finished
+        // Set "should flush" to false since we are currently flushing...
+        self.should_flush = false;
+
+        // If already in tx, we don't need to flush
+        if self.is_tx() {
+            return Ok(());
+        }
+
+        // Otherwise wait to make sure there are no recieves
         self.wait_rx()?;
 
         self.start_block_tx()?;
-        self.wait_tx()?;
 
         Ok(())
     }

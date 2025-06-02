@@ -744,22 +744,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         }
     }
 
-    /// Send a command to the SD card, retries thrice
+    /// Send a command to the SD card
     pub fn send_command(&mut self, command: SdCmd) -> Result<SdCmdResponse, SdioError> {
-        for _ in 1..SD_RETRIES {
-            match self.send_command_raw(command) {
-                Ok(response) => {
-                    return Ok(response);
-                }
-                Err(_) => {}
-            }
-        }
-
-        self.send_command_raw(command)
-    }
-
-    /// Send a command to the SD card, does not retry
-    fn send_command_raw(&mut self, command: SdCmd) -> Result<SdCmdResponse, SdioError> {
         // If the command is an app command, first send the AppCmd command
         if command.is_acmd() {
             self.send_command(SdCmd::AppCmd(self.rca))?;

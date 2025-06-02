@@ -116,9 +116,9 @@ pub fn calculate_crc7_from_words(words: &[u32], skip: usize, len: usize) -> u8 {
 
 // This crc algorithm is based on the CRC16 generator/checker specified in the
 // Part 1 Physical Layer Simplified Specification
+// !INLINING REDUCES PERFORMANCE!
 pub fn crc16_4bit(data: &[u32]) -> u64 {
-    let mut crc: u64 = 0;
-
+    let mut crc = 0;
     // Simulate a hardware crc calculator
     for word in data {
         // Convert the data from 4 bytes into 1 word, and assign it to "data in"
@@ -639,8 +639,9 @@ pub struct Sdio4bit<'a, DmaCh: SingleChannelDma, P: PIOExt> {
     working_block: Option<&'static mut [u32; SD_BLOCK_LEN_TOTAL / SD_WORD_DIV]>,
     /// The address of the current working block
     working_block_num: u32,
-    /// Set true if we should flush
-    should_flush: bool,
+    /// Set true if we dirty
+    dirty: bool,
+
     /// The current read/write position
     position: u64,
     /// The size of the sd card in blocks
@@ -729,7 +730,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
 
             working_block: Some(working_block),
             working_block_num: 0,
-            should_flush: false,
+            dirty: false,
 
             position: 0,
             size: 0,
@@ -1119,7 +1120,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.dma = Some(dma);
         self.working_block = Some(working_block);
         self.sm_dat = Some(sm_dat);
-
+        
         let response = match response {
             Some(response) => response,
             None => {
@@ -1276,6 +1277,7 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Sdio4bit<'a, DmaCh, P> {
         self.dma = Some(dma);
         self.working_block = Some(working_block);
         self.sm_dat = Some(sm_dat);
+
 
         // Check the crc and if it's bad, error out!
 
@@ -1483,8 +1485,8 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Write for Sdio4bit<'a, DmaCh, P> {
             self.wait_rx()?;
         }
 
-        // Set "should flush" to true since we are writing to the data!
-        self.should_flush = true;
+        // Set "dirty" to true since we are writing to the data!
+        self.dirty = true;
 
         let working_block = &mut **self.working_block.as_mut().unwrap();
         let working_block_bytes = bytes_of_mut(working_block);
@@ -1496,19 +1498,19 @@ impl<'a, DmaCh: SingleChannelDma, P: PIOExt> Write for Sdio4bit<'a, DmaCh, P> {
         working_block_bytes[block_index..block_index + bytes_transfered].copy_from_slice(&buffer[..bytes_transfered]);
 
         self.position += bytes_transfered as u64;
-        
+
         Ok(bytes_transfered)
 
     }
 
     fn flush(&mut self) -> Result<(), SdioError> {
         // If we don't need to flush, don't flush!
-        if !self.should_flush {
+        if !self.dirty {
             return Ok(());
         }
 
-        // Set "should flush" to false since we are currently flushing...
-        self.should_flush = false;
+        // Set "dirty" to false since we are currently flushing...
+        self.dirty = false;
 
         // If already in tx, we don't need to flush
         if self.is_tx() {
